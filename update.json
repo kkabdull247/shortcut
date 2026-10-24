@@ -1,7 +1,13 @@
 {
- "version": "23.3.0",
- "url": "https://github.com/kkabdull247/shortcut/releases/latest",
- "setup": "https://github.com/kkabdull247/shortcut/releases/latest/download/Cutloom-Setup.exe",
- "page": "https://cutloom.vercel.app/download",
+ "version": "23.3.1",
+ "url": "https://cutloom.vercel.app/download/#start",
+ "page": "https://cutloom.vercel.app/download/",
+ "parts": [
+  "https://cutloom-dl.vercel.app/v23.3.1/Cutloom-Setup.part0",
+  "https://cutloom-dl.vercel.app/v23.3.1/Cutloom-Setup.part1",
+  "https://cutloom-dl.vercel.app/v23.3.1/Cutloom-Setup.part2"
+ ],
+ "size": 205726608,
+ "sha1": "1590f47a27d9c8803e380004967e376e365a57ac",
  "notes": "Cutloom now updates itself. New versions download in the background and install with one click."
 }
