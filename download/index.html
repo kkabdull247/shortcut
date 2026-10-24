@@ -36,10 +36,10 @@ footer{border-top:1px solid var(--line);padding:28px 0;color:var(--mute);font-si
 <div class="wrap">
 <nav><div class="brand"><img src="logo.svg" alt="">CUTLOOM</div><a class="small" href="#whatsnew">What's new</a></nav>
 <div class="hero">
-<span class="pill">Latest version <b id="ver">23.3.0</b> &middot; Windows 10 and 11</span>
+<span class="pill">Latest version <b id="ver">23.3.1</b> &middot; Windows 10 and 11</span>
 <h1>Long videos in.<br><span>Viral shorts out.</span></h1>
 <p class="lead">Cutloom cuts your long videos into Shorts, Reels and TikToks with auto captions in English, Urdu script and Roman Urdu. Everything runs on your own PC.</p>
-<a class="btn" id="dl" href="https://github.com/kkabdull247/shortcut/releases/latest/download/Cutloom-Setup.exe">
+<a class="btn" id="dl" href="/download/">
 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
 Download for Windows</a>
 <div class="meta" id="size">Free &middot; about 206 MB &middot; Installs in under a minute</div>
@@ -69,6 +69,15 @@ Download for Windows</a>
 </ul></div></div></section>
 <div class="wrap"><footer><span>&copy; 2026 Cutloom</span><a href="https://cutloom.vercel.app">Open Cutloom in your browser</a></footer></div>
 <script>
-fetch('/update.json',{cache:'no-store'}).then(r=>r.json()).then(u=>{if(u.version)document.getElementById('ver').textContent=u.version;if(u.setup||u.url)document.getElementById('dl').href=u.setup||u.url;}).catch(()=>{});
+let U={};const dl=document.getElementById('dl'),meta=document.getElementById('size'),base=meta.textContent;
+fetch('/update.json',{cache:'no-store'}).then(r=>r.json()).then(u=>{U=u;if(location.hash==='#start'&&u.parts&&u.parts.length)setTimeout(()=>dl.click(),300);if(u.version)document.getElementById('ver').textContent=u.version;if(u.size)meta.textContent='Free \u00b7 about '+Math.round(u.size/1e6)+' MB \u00b7 Installs in under a minute'}).catch(()=>{});
+let busy=false;
+dl.addEventListener('click',async e=>{if(!(U.parts&&U.parts.length))return;e.preventDefault();if(busy)return;busy=true;
+ const total=U.size||0;let got=0;const bufs=[];
+ try{for(const p of U.parts){const r=await fetch(p);if(!r.ok)throw new Error('HTTP '+r.status);const rd=r.body.getReader();for(;;){const {done,value}=await rd.read();if(done)break;bufs.push(value);got+=value.length;meta.textContent='Downloading... '+(total?Math.floor(got/total*100)+'%':Math.round(got/1e6)+' MB')+' (keep this page open)'}}
+  const blob=new Blob(bufs,{type:'application/octet-stream'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Cutloom-Setup.exe';document.body.appendChild(a);a.click();a.remove();
+  meta.textContent='Done. Open Cutloom-Setup.exe from your Downloads folder.';setTimeout(()=>URL.revokeObjectURL(a.href),60000)}
+ catch(err){meta.textContent='Download stopped ('+err.message+'). Check your internet and press the button again.'}
+ busy=false});
 </script>
 </body></html>
