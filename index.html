@@ -2488,20 +2488,22 @@ const IS_MOBILE=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigato
    in a module worker (falls back to the page thread, then to the hf-mirror.com model host).
    OPTIONAL "Use GPU" = @huggingface/transformers 3.8.1 on WebGPU; its output is validated and silently redone on the CPU engine if it looks wrong. */
 const TF2_URLS=['https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js','https://unpkg.com/@xenova/transformers@2.17.2/dist/transformers.min.js','https://esm.sh/@xenova/transformers@2.17.2'];
-const TF3_URLS=['https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js','https://unpkg.com/@huggingface/transformers@3.8.1/dist/transformers.min.js','https://esm.sh/@huggingface/transformers@3.8.1?bundle'];
-const CAP_WIN=30,CAP_STEP=26;
+const TF3_URLS=[location.origin+'/vendor/tf3/transformers.min.js','https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js','https://unpkg.com/@huggingface/transformers@3.8.1/dist/transformers.min.js','https://esm.sh/@huggingface/transformers@3.8.1?bundle'];
+const CAP_WIN=30,CAP_STEP=26,CAP_MIRROR='https://cutloom-dl.vercel.app/models/';
 const CAP_BODY=`
 const SR=16000,WIN=30*SR,STEP=26*SR;
-let tf=null,tfv='',pipe=null,key='';
+let tf=null,tfv='',tfu='',pipe=null,key='';
 async function lib(v){if(tf&&tfv===v)return tf;const urls=v==='v3'?URLS3:URLS2;let err='',t=null;
- for(const u of urls){try{const m=await import(u);t=m&&m.pipeline?m:(m&&m.default&&m.default.pipeline?m.default:null);if(!t)throw new Error('no pipeline export');break}catch(e){t=null;err+=u.split('/')[2]+': '+((e&&e.message)||e)+'; '}}
+ for(const u of urls){try{const m=await import(u);t=m&&m.pipeline?m:(m&&m.default&&m.default.pipeline?m.default:null);if(!t)throw new Error('no pipeline export');tfu=u;break}catch(e){t=null;err+=u.split('/')[2]+': '+((e&&e.message)||e)+'; '}}
  if(!t)throw Object.assign(new Error('Could not load the speech library from the CDN ('+err+')'),{net:1});
  tf=t;tfv=v;tf.env.allowLocalModels=false;try{tf.env.useBrowserCache=true}catch(_){}
+ /* v23.5: the ONNX runtime wasm comes from the same place as the library (bundled in vendor/tf3, no CDN) */
+ if(v==='v3'&&tfu.indexOf('/vendor/tf3/')>0){try{tf.env.backends.onnx.wasm.wasmPaths=tfu.replace(/[^/]+$/,'')}catch(_){}}
  try{const w=tf.env.backends.onnx.wasm;w.numThreads=1;w.proxy=false}catch(_){}
  return tf}
 async function load(d){const k=[d.lib,d.model,d.device,JSON.stringify(d.dtype),d.host||''].join('|');if(pipe&&key===k)return pipe;
  if(pipe){try{await pipe.dispose()}catch(_){}}pipe=null;key='';
- const t=await lib(d.lib);try{t.env.remoteHost=d.host||'https://huggingface.co/'}catch(_){}
+ const t=await lib(d.lib);try{t.env.remoteHost=d.host||'https://huggingface.co/';t.env.remotePathTemplate='{model}/resolve/{revision}/'}catch(_){}
  const files={};let lastSent=0;
  const cb=p=>{if(p.status==='progress'&&p.file){files[p.file]=[p.loaded||0,p.total||0];const now=Date.now();if(now-lastSent>250){lastSent=now;let L=0,T=0;for(const f in files){L+=files[f][0];T+=files[f][1]}postMessage({type:'dl',loaded:L,total:T})}}else if(p.status==='initiate'||p.status==='done'||p.status==='ready')postMessage({type:'tick',s:p.status,file:p.file||''})};
  pipe=d.lib==='v3'?await t.pipeline('automatic-speech-recognition',d.model,{device:d.device,dtype:d.dtype,progress_callback:cb})
@@ -2574,7 +2576,7 @@ function capLoad(spec){const k=JSON.stringify(spec);if(CAPE.w&&CAPE.key===k&&CAP
   w.postMessage(Object.assign({type:'load'},spec))});
  CAPE.ready.catch(()=>{});return CAPE.ready}
 /* warm up only the small Tiny model on the CPU engine. Bigger models load only when the user presses Generate. */
-async function capWarm(){try{if(!navigator.onLine||CAPE.w)return;const c=navigator.connection;if(c&&(c.saveData||/(^|-)2g$/.test(c.effectiveType||'')))return;const m=capModel();if(!/whisper-tiny/.test(m))return;if(CAPE.w)return;capLoad(capSpecCpu(m))}catch(_){}}
+async function capWarm(){try{if(!navigator.onLine||CAPE.w)return;const c=navigator.connection;if(c&&(c.saveData||/(^|-)2g$/.test(c.effectiveType||'')))return;const m=capModel();if(!/whisper-tiny/.test(m))return;if(CAPE.w)return;capLoad(IS_MOBILE?capSpecV3(m):capSpecCpu(m))}catch(_){}}
 function capRunOn(w,d,spec,windows,onWin){return new Promise((ok,no)=>{let tm=0;const arm=()=>{clearTimeout(tm);tm=setTimeout(()=>{off();no(new Error('The speech engine stopped responding (no answer for 3 minutes)'))},180000)};
  const off=()=>{clearTimeout(tm);w.removeEventListener('message',h)};
  const h=e=>{const x=e.data;arm();if(x.type==='lang'){CAPE.lang=x.lang;return}if(x.type==='win')onWin(x);else if(x.type==='done'){off();ok(x.chunks)}else if(x.type==='error'){off();no(Object.assign(new Error(x.message),{net:x.net}))}};
@@ -2616,10 +2618,12 @@ async function capGo(spec,d,m,T0){const isG=spec.device==='webgpu';
  return out}
 /* ---------- offline engine on this PC (desktop app): whisper.cpp + large-v3-turbo, model downloaded once ---------- */
 const WSP={bin:false};
-(async()=>{try{const r=await fetch('/api/wsp?status=1');if(!r.ok)return;const j=await r.json();WSP.bin=!!j.bin;if(!WSP.bin)return;
- const q=$('acQ');if(q){q.options[0].text='Fast (Small, 190 MB, about 3x quicker)';if(q.options[1])q.options[1].text='Best quality (Large v3 Turbo, 574 MB)';if(q.value!=='fast')q.value='acc'}
- const st=$('acStat');if(st)st.textContent='Captions run on this PC with Whisper Large v3 Turbo (best for Urdu and English). The model downloads once (574 MB) into Cutloom Data on your app drive.'}catch(_){}})();
-const wspModel=()=>val('acQ')==='fast'?'small':'turbo';
+(async()=>{try{if(!DESK)return;const r=await fetch('/api/wsp?status=1');if(!r.ok)return;const j=await r.json();WSP.bin=!!j.bin;if(!WSP.bin)return;
+ /* v23.5: three choices; Fast (Base) is the default because Small/Large were far too slow on many laptops */
+ const q=$('acQ');if(q){q.innerHTML='<option value="fast">Fast (Base, 60 MB, quickest)</option><option value="bal">Balanced (Small, 190 MB)</option><option value="acc">Best quality (Large v3 Turbo, 574 MB, slow on older PCs)</option>';
+  const k='cutloom.v235.acq';const sv=localStorage.getItem(k);q.value=sv&&['fast','bal','acc'].includes(sv)?sv:'fast';q.addEventListener('change',()=>localStorage.setItem(k,q.value))}
+ const st=$('acStat');if(st)st.textContent='Captions run on this PC with whisper.cpp ('+(j.threads||'all')+' CPU threads'+(j.vad?', silence skipped':'')+'). Fast uses the Base model (60 MB, downloads once). For hard Urdu audio pick Balanced or Best quality.'}catch(_){}})();
+const wspModel=()=>({fast:'base',bal:'small',acc:'turbo'})[val('acQ')]||'base';
 async function capLocal(d,m){const T0=performance.now(),mod=wspModel(),bar=p=>{$('busyBar').style.width=Math.round(p*100)+'%'};
  let st=await (await fetch('/api/wsp?status=1&model='+mod)).json();
  if(!st.ready){await fetch('/api/wsp?download=1&model='+mod,{method:'POST'});
@@ -2627,13 +2631,15 @@ async function capLocal(d,m){const T0=performance.now(),mod=wspModel(),bar=p=>{$
    if(st.ready)break;if(st.error)throw new Error(st.error);
    const p=st.total?st.got/st.total:0;bar(p);m('Downloading the '+st.label+' speech model, one time only: '+Math.round(st.got/1048576)+' of '+Math.round(st.total/1048576)+' MB')}}
  const lang=d.translate?'':(GROQ_LANG[d.lang]||'');
- m('Transcribing on this PC ('+st.label+')...');bar(0);
+ m('Transcribing on this PC (whisper.cpp, '+st.label+', '+(st.threads||'?')+' threads)...');bar(0);
  const r=await fetch('/api/wsp?model='+mod+'&lang='+lang+(d.translate?'&translate=1':'')+(window.capStyleParam&&capStyleParam()?'&style='+capStyleParam():''),{method:'POST',headers:{'Content-Type':'audio/wav'},body:pcmToWav(d.audio)});
  const jj=await r.json();if(!r.ok)throw new Error(jj.error||('HTTP '+r.status));
  const t1=performance.now();let j;
  while(true){await sleep(800);if(d.job!=null&&d.job!==capJob){fetch('/api/wsp?cancel='+jj.job,{method:'POST'});throw new Error('cancelled')}
   j=await (await fetch('/api/wsp?job='+jj.job)).json();if(j.error)throw new Error(j.error);if(j.done)break;
-  const p=(j.pct||0)/100,el=(performance.now()-t1)/1000,left=p>.03?Math.round(el/p*(1-p)):0;bar(p);m(p<.01?(j.stage==='loading'?'Loading the speech model ('+st.label+') into memory... '+Math.round(el)+' s':'Listening to the audio ('+st.label+')... '+Math.round(el)+' s')+(el>60&&st.label!=='Small'?' · For quicker captions choose Fast in the caption quality menu.':''):'Transcribing on this PC ('+st.label+'): '+Math.round(p*100)+'%'+(left?' · about '+(left>90?Math.round(left/60)+' min':left+' s')+' left':''))}
+  const p=(j.pct||0)/100,el=(performance.now()-t1)/1000;if(p>0&&!d._p0){d._p0=[el,p]}
+  /* v23.5: ETA from the speed since the first progress report (model loading time is not counted as transcription speed) */
+  const left=p>.03&&d._p0&&p>d._p0[1]?Math.round((el-d._p0[0])/(p-d._p0[1])*(1-p)):0,eng='whisper.cpp, '+st.label+', '+(j.threads||st.threads||'?')+' threads'+(j.vad?', silence skipped':'');bar(p);m(p<.01?(j.stage==='loading'?'Loading the speech model ('+eng+') into memory... '+Math.round(el)+' s':'Listening to the audio ('+eng+')... '+Math.round(el)+' s')+(el>60&&st.label!=='Base'?' · For quicker captions choose Fast in the caption quality menu.':''):'Transcribing on this PC ('+eng+'): '+Math.round(p*100)+'%'+(left?' · about '+(left>90?Math.round(left/60)+' min':left+' s')+' left':'')+(left>600&&st.label!=='Base'?' · Fast (Base) is several times quicker.':''))}
  const out=(j.segments||[]).filter(x=>String(x.text||'').trim()&&!/^\s*[\[(].*[\])]\s*$/.test(x.text)).map(x=>({text:' '+String(x.text).trim(),timestamp:[x.start,Math.max(x.end,x.start+.2)]}));
  const ln=j.language||null;CAPE.lang=ln;CAPE.last={lang:ln,device:'local',lib:'whisper.cpp',model:'pc/'+st.label,windows:1,engines:1,totalMs:performance.now()-T0,runMs:performance.now()-t1};CAPE.log=[];return out}
 /* ---------- Groq cloud engine (whisper-large-v3): fast and much better Urdu. Used when a key is saved. ---------- */
@@ -2680,13 +2686,15 @@ async function transcribe(d,m){const T0=performance.now(),secs=d.audio.length/16
  /* v23.4: the newer ONNX runtime (transformers.js 3, WASM) is far more stable on phones (the old one fails with OrtRun error 6 / unsupported model there).
     Phones try it first, with the Tiny model when memory is low; computers keep it as the last fallback. */
  {const v3=[capSpecV3(model)];if(!/whisper-tiny/.test(model))v3.push(capSpecV3(capTinyOf(model)));
-  if(IS_MOBILE){const lowMem=(navigator.deviceMemory||4)<=4;plans=(lowMem&&!/whisper-tiny/.test(model)?[capSpecV3(capTinyOf(model))]:v3).concat(plans)}else plans=plans.concat(v3)}
+  if(IS_MOBILE){const lowMem=(navigator.deviceMemory||4)<=3,M=CAP_MIRROR,mir=x=>Object.assign({},x,{host:M}),first=lowMem&&!/whisper-tiny/.test(model)?[capSpecV3(capTinyOf(model))]:v3;
+   /* v23.5: phones never use the old engine (it fails there); every model is tried from Hugging Face, then from the Cutloom mirror */
+   plans=[];first.forEach(x=>{plans.push(x,mir(x))})}else plans=plans.concat(v3,v3.map(x=>Object.assign({},x,{host:CAP_MIRROR})))}
  for(let i=0;i<plans.length;i++){const spec=plans[i];
   try{if(i)m(spec.host?'Retrying the model download from a mirror server...':'Retrying with the small model...');
    let out=await capGo(spec,d,m,T0);if(cancelled())throw new Error('cancelled');
    /* English-only model on speech that is not English gives junk: redo with the multilingual model */
    if(d.english&&d.autoLang){const bad=capQuality(out,secs,false);if(bad){notes.push('English model gave '+bad+', used the multilingual model');m('This does not sound like English, retrying with the multilingual model...');
-     const sp2=capSpecCpu(spec.model.replace(/\.en$/,''),spec.host),out2=await capGo(sp2,Object.assign({},d,{english:false,lang:'auto'}),m,T0);if(cancelled())throw new Error('cancelled');
+     const sp2=spec.lib==='v3'?Object.assign({},spec,{model:spec.model.replace(/\.en$/,'')}):capSpecCpu(spec.model.replace(/\.en$/,''),spec.host),out2=await capGo(sp2,Object.assign({},d,{english:false,lang:'auto'}),m,T0);if(cancelled())throw new Error('cancelled');
      if(!capQuality(out2,secs,false)||capWordCount(out2)>capWordCount(out))out=out2}}
    /* Whisper sometimes loops on one word (weak languages, music, noise): retry once with repetition control */
    {const b0=capQuality(out,secs,false);if(/repeated|too many/.test(b0)){m('Some text repeated itself, retrying with repetition control...');const lang0=CAPE.lang;
@@ -2720,8 +2728,7 @@ function capShowErr(e,prefix){const st=$('acStat'),msg=(e&&e.message)||String(e)
 function capClearErr(){$('acStat').classList.remove('caperr')}
 $('acGo').onclick=async()=>{const st=$('acStat'),m=t=>{capClearErr();st.textContent=t;setBusy(true,t,null,'cap')},btn=$('acGo');if(!S.file||btn.disabled)return;btn.disabled=true;capJob++;const job=capJob;const sidNow=S.activeSourceId,fileNow=S.file;
  try{const all=val('acS')==='all',a=all?0:S.start,b=all?v.duration:S.end,N=+val('acW'),model=capModel(),en=model.endsWith('.en');
-  if(IS_MOBILE&&S.file.size>150e6){m('This file is too large to caption on a phone without crashing the tab. Trim it on a computer or use a shorter video.');return}
-  if(IS_MOBILE&&!/tiny/.test(model)&&!confirm('Bigger speech models can crash phone browsers. Continue? (Tiny is safer.)'))return;
+  if(IS_MOBILE&&S.file.size>(clStreamable(S.file)?4e9:150e6)){m('This file is too large to caption on a phone. Trim it first, or export a shorter part and caption that.');return}
   m('Preparing audio without blocking the editor...');let au;
   try{au=(S.ab16&&S.ab16.file===fileNow&&S.ab16.a===a&&S.ab16.b===b)?S.ab16.pcm:null;if(!au){const r=await audio16kFrom(fileNow,a,b);au=r.pcm;S.ab16={file:fileNow,a,b,pcm:au}}}
   catch(e){setBusy(false);capShowErr(e,'No usable sound');return}
@@ -2887,7 +2894,9 @@ const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,r)=>setTimeout(()=>r(ne
 /* choose an encoder this device really supports: smaller sizes, lower H.264 levels, then VP9 / AV1 inside the MP4 */
 async function pickVideoConfig(W0,H0,fps,bits,speed,hwOff){
  const H264=['avc1.640034','avc1.640033','avc1.64002a','avc1.4d0033','avc1.4d002a','avc1.640028','avc1.4d0028','avc1.42002a','avc1.420028','avc1.64001f','avc1.42001f','avc1.42E01E'],OTHER=[['vp09.00.10.08','vp9'],['av01.0.04M.08','av1']];
- const tries=[];for(const hw of ['prefer-software','no-preference'])H264.forEach(c=>tries.push([c,'avc',hw]));for(const hw of ['prefer-software','no-preference'])OTHER.forEach(([c,m])=>tries.push([c,m,hw]));
+ /* v23.5: phones use their hardware encoder first (much faster than software H.264 there); computers keep software first (GPU encoders gave green frames) */
+ const HW=IS_MOBILE&&!hwOff?['no-preference','prefer-software']:['prefer-software','no-preference'];
+ const tries=[];for(const hw of HW)H264.forEach(c=>tries.push([c,'avc',hw]));for(const hw of HW)OTHER.forEach(([c,m])=>tries.push([c,m,hw]));
  for(const sc of [1,.85,.75,.667,.5]){const W=Math.max(2,Math.round(W0*sc/2)*2),H=Math.max(2,Math.round(H0*sc/2)*2),br=Math.round(bits*(W*H)/(W0*H0));
   for(const [codec,mux,hw] of tries){const cfg={codec,width:W,height:H,bitrate:br,bitrateMode:'variable',framerate:fps,latencyMode:speed==='best'?'quality':'realtime',hardwareAcceleration:hw};if(mux==='avc')cfg.avc={format:'avc'};
     try{const r=await VideoEncoder.isConfigSupported(cfg);if(r&&r.supported)return{cfg:r.config||cfg,mux,W,H,scaled:sc<1}}catch(e){}}}
@@ -3609,7 +3618,7 @@ function applyAccent(){let i=+(localStorage.getItem('ss.accent')||0);if(!ACCS[i]
 layTrackDraw();
 /* ---------- v15: Urdu captions (script + Roman Urdu), voice emphasis ---------- */
 {const _lf=loadFonts;loadFonts=function(){const ps=[_lf()];if(anyRTL())ps.push(UR_P||urduLoad());return Promise.all(ps)}}
-const capLang=()=>{const l=val('acL');return(l==='romanurdu'||l==='hinglish')?'hindi':l};
+const capLang=()=>{const l=val('acL');return l==='romanurdu'?'urdu':l==='hinglish'?'hindi':l};   /* v23.5: Roman Urdu is heard as Urdu (Hindi decoding looped on Urdu speech), then urduToRoman writes it in Latin letters */
 const romanMode=()=>val('acL')==='romanurdu'||val('acL')==='hinglish';
 const emphOn=()=>$('capEm')?$('capEm').checked:true;
 function capModel(){let m=val('acM');const l=val('acL');if(m.endsWith('.en')&&l!=='auto'&&l!=='english')m=(l==='urdu'||l==='romanurdu'||l==='hinglish')&&!IS_MOBILE?'Xenova/whisper-small':'Xenova/whisper-base';if(m.endsWith('.en')&&$('acT').checked&&l!=='english')m=m.slice(0,-3);return m}
@@ -3647,7 +3656,7 @@ $('acRoman').onclick=()=>{$('acL').value='romanurdu';$('acM').value=IS_MOBILE?'X
 document.addEventListener('focusin',e=>{const t=e.target;if(t&&(t.tagName==='TEXTAREA'||(t.tagName==='INPUT'&&t.type==='text')))t.dir='auto'});
 /* ---------- v16: caption helpers ---------- */
 const capIncomplete=(chunks,d)=>{const dur=d.audio.length/16000,words=(chunks||[]).reduce((p,c)=>p+String(c.text||'').trim().split(/\s+/).filter(Boolean).length,0);return dur>15&&words<.25*dur};
-function qModel(){const q=val('acQ'),l=val('acL'),en=(l==='english'||(l==='auto'&&!$('acT').checked)),t=q==='fast'?'tiny':q==='acc'?'small':'base';return 'Xenova/whisper-'+t+(en?'.en':'')}
+function qModel(){const q=val('acQ'),l=val('acL'),en=(l==='english'||(l==='auto'&&!$('acT').checked&&!IS_MOBILE)),t=q==='fast'?'tiny':q==='acc'?'small':'base';return 'Xenova/whisper-'+t+(en?'.en':'')}
 function capModel(){let m=S.acMTouched?val('acM'):qModel();const l=val('acL');if(m.endsWith('.en')&&l!=='auto'&&l!=='english')m=(l==='urdu'||l==='romanurdu'||l==='hinglish')&&!IS_MOBILE?'Xenova/whisper-small':'Xenova/whisper-base';if(m.endsWith('.en')&&$('acT').checked&&l!=='english')m=m.slice(0,-3);return m}
 $('acM').addEventListener('change',()=>{S.acMTouched=true});
 const qSync=()=>{if(!S.acMTouched){const m=qModel();if([...$('acM').options].some(o=>o.value===m))$('acM').value=m}};
@@ -3775,7 +3784,7 @@ $('acAll').onclick=async()=>{const st=$('acStat'),m=t=>{st.textContent=t;setBusy
  try{for(let n=0;n<sids.length;n++){if(job!==capJob)return;
    const sid=sids[n],meta=(S.sources&&S.sources[sid])||{},name=meta.name||('video '+(n+1)),clips=order.filter(g=>(g.sourceId||S.activeSourceId)===sid),
     a=clips.length?Math.min(...clips.map(g=>g.s)):0,b=clips.length?Math.max(...clips.map(g=>g.e)):(meta.duration||v.duration),mm=t=>m('Video '+(n+1)+' of '+sids.length+': '+t);
-   try{const file=await srcFile(sid);if(IS_MOBILE&&file.size>150e6){skipped.push(name+' (too large for a phone)');continue}
+   try{const file=await srcFile(sid);if(IS_MOBILE&&file.size>(clStreamable(file)?4e9:150e6)){skipped.push(name+' (too large for a phone)');continue}
     mm('Preparing audio...');const au=await audio16k(file,a,b);if(!au){skipped.push(name+' (no readable audio track)');continue}
     const pk=packSpeech(au);mm('Loading speech model (first time downloads it)...');
     const chunks=await transcribe({type:'run',audio:pk.audio,model,lang:capLang(),translate:$('acT').checked,english:en,autoLang:val('acL')==='auto',gpu:$('acGpu').checked,job},mm);if(job!==capJob)return;
@@ -3799,10 +3808,27 @@ $('lnkGo').addEventListener('click',()=>ytEmbed(val('lnk').trim()));
 
 /* ---- turbo decoder: demux with mp4box, decode with WebCodecs (no real-time playback) ---- */
 const MP4BOX_URL='/vendor/mp4box.all.min.js';
+/* v23.5: read MP4/MOV files in pieces instead of loading the whole file into memory (phones crashed on big videos).
+   1) the top-level boxes are scanned, ftyp/moov are fed whole and mdat only by its header (works for moov-at-end files),
+   2) after the header is parsed, mp4box seeks to the wanted time and the media data is fed in 4 MB pieces until done(). */
+const clStreamable=f=>!!f&&(/\.(mp4|m4v|mov|m4a|3gp|3g2)$/i.test(f.name||'')||/^(video|audio)\/(mp4|quicktime|3gpp|x-m4a)/.test(f.type||''));
+async function clMp4Boxes(file){const out=[];let p=0;
+ while(p+8<=file.size&&out.length<200){const dv=new DataView(await file.slice(p,Math.min(file.size,p+16)).arrayBuffer());let sz=dv.getUint32(0),hl=8;const ty=String.fromCharCode(dv.getUint8(4),dv.getUint8(5),dv.getUint8(6),dv.getUint8(7));
+  if(sz===1&&dv.byteLength>=16){sz=Number(dv.getBigUint64(8));hl=16}else if(sz===0)sz=file.size-p;if(sz<8||!/^[\x20-\x7e]{4}$/.test(ty))break;out.push({type:ty,start:p,size:sz,hl});p+=sz}
+ return out}
+async function clMp4Stream(file,mp4,ready,seekT,done,failed,CH){CH=CH||4194304;if(!window.MP4Box)await loadScript(MP4BOX_URL);
+ const boxes=await clMp4Boxes(file);if(!boxes.length||boxes[0].type!=='ftyp'&&!boxes.some(b=>b.type==='moov'))throw new Error('not an MP4/MOV file');
+ if(!boxes.some(b=>b.type==='moov')){const ab=await file.arrayBuffer();ab.fileStart=0;mp4.appendBuffer(ab);mp4.flush();return}
+ for(const bx of boxes){if(ready()||(failed&&failed()))break;if(bx.type==='mdat'||bx.type==='free'||bx.type==='skip'){const ab=await file.slice(bx.start,bx.start+Math.min(bx.size,bx.hl)).arrayBuffer();ab.fileStart=bx.start;mp4.appendBuffer(ab);continue}
+  if(bx.size>400e6)throw new Error('MP4 header too large');const ab=await file.slice(bx.start,bx.start+bx.size).arrayBuffer();ab.fileStart=bx.start;mp4.appendBuffer(ab)}
+ if(!ready())return;
+ let from=0;try{const t=typeof seekT==='function'?seekT():seekT,sk=mp4.seek(t,true);from=sk&&sk.offset>=0?sk.offset:0}catch(_){}
+ if(!from){const md=boxes.find(b=>b.type==='mdat');from=md?md.start:0}
+ for(let p=from;p<file.size&&!done()&&!(failed&&failed());){const ab=await file.slice(p,Math.min(file.size,p+CH)).arrayBuffer();ab.fileStart=p;mp4.appendBuffer(ab);p+=ab.byteLength;await 0}
+ mp4.flush()}
 let _fcv=null;const FCV=()=>_fcv||(_fcv=document.createElement('canvas'));
 async function fastSeg(o){const {file,a,b,fps,n,getJ,emit,fc,pace}=o;
  if(!window.VideoDecoder||!window.EncodedVideoChunk)throw new Error('WebCodecs decoder unavailable');
- if(file.size>650e6)throw new Error('file too large for the turbo decoder');
  if(!window.MP4Box)await loadScript(MP4BOX_URL);
  const mp4=MP4Box.createFile();let info=null,vt=null,err=null,toff=0;const keep=[];
  mp4.onError=e=>{err=new Error('mp4box: '+e)};
@@ -3810,14 +3836,14 @@ async function fastSeg(o){const {file,a,b,fps,n,getJ,emit,fc,pace}=o;
   try{const tk=mp4.getTrackById(vt.id),en=tk.edts&&tk.edts.elst&&tk.edts.elst.entries&&tk.edts.elst.entries[0];if(en&&en.media_time>0)toff=en.media_time/vt.timescale}catch(_){}
   mp4.setExtractionOptions(vt.id,null,{nbSamples:400});mp4.start()};
  mp4.onSamples=(id,u,ss)=>{for(const s of ss){const ts=s.timescale,c=s.cts/ts-toff;if(s.dts/ts-toff>b+1.5)continue;if(s.is_sync&&c<=a+1e-3)keep.length=0;keep.push(s)}};
- const ab=await file.arrayBuffer();ab.fileStart=0;mp4.appendBuffer(ab);mp4.flush();
+ await clMp4Stream(file,mp4,()=>info&&vt,()=>Math.max(0,a-.05),()=>{const l=keep[keep.length-1];return !!l&&l.dts/l.timescale-toff>b+1.5},()=>err);
  if(err)throw err;if(!info||!vt)throw new Error('no video track found');
  const mt=vt.matrix;let rot=0;if(mt){const sg=q=>q>2147483647?q-4294967296:q,a0=sg(mt[0]),b0=sg(mt[1]);rot=Math.round(Math.atan2(b0,a0)*180/Math.PI/90)*90;rot=((rot%360)+360)%360;if(!(a0||b0))throw new Error('rotated video')}let rc=null;
  if(!keep.length)throw new Error('no samples in range');
  const trak=mp4.getTrackById(vt.id),entry=trak.mdia.minf.stbl.stsd.entries[0],box=entry.avcC||entry.hvcC;if(!box)throw new Error('codec not supported by the turbo decoder');
  const DS=window.DataStream||(MP4Box&&MP4Box.DataStream),ds=new DS(undefined,0,DS.BIG_ENDIAN);box.write(ds);const description=new Uint8Array(ds.buffer,8);
  const W0=vt.video.width,H0=vt.video.height;let cfg=null;
- for(const hw of ['prefer-software','no-preference']){const c={codec:vt.codec,codedWidth:W0,codedHeight:H0,description,hardwareAcceleration:hw,optimizeForLatency:true};try{if((await VideoDecoder.isConfigSupported(c)).supported){cfg=c;break}}catch(_){}}
+ for(const hw of (IS_MOBILE&&!S.hwOff?['no-preference','prefer-software']:['prefer-software','no-preference'])){const c={codec:vt.codec,codedWidth:W0,codedHeight:H0,description,hardwareAcceleration:hw,optimizeForLatency:true};try{if((await VideoDecoder.isConfigSupported(c)).supported){cfg=c;break}}catch(_){}}
  if(!cfg)throw new Error('decoder configuration not supported');
  const fq=[];let derr=null,prev=null,last=performance.now();EXP.path='turbo';
  const dec=new VideoDecoder({output:f=>{f.videoWidth=f.displayWidth;f.videoHeight=f.displayHeight;fq.push(f)},error:e=>{derr=e}});dec.configure(cfg);
@@ -5204,10 +5230,25 @@ v.addEventListener('play',()=>{if(!busyOn())document.body.classList.remove('heav
 const UW={'ہے':'hai','ہیں':'hain','میں':'main','نہیں':'nahi','کیا':'kya','آپ':'aap','ہم':'hum','تم':'tum','یہ':'yeh','وہ':'woh','اور':'aur','کے':'ke','کی':'ki','کا':'ka','کو':'ko','سے':'se','پر':'par','بھی':'bhi','تو':'to','ہو':'ho','تھا':'tha','تھی':'thi','تھے':'thay','گا':'ga','گی':'gi','گے':'ge','جو':'jo','اب':'ab','آج':'aaj','کل':'kal','بہت':'bohat','اچھا':'acha','اچھی':'achi','ٹھیک':'theek','کر':'kar','کرو':'karo','کریں':'karein','ہوں':'hoon','ہاں':'haan','نا':'na','مجھے':'mujhe','ہمیں':'humein','آپکو':'aapko','اپنے':'apne','اپنا':'apna','کیوں':'kyun','کیسے':'kaise','کب':'kab','کہاں':'kahan','یار':'yaar','بھائی':'bhai','سب':'sab','لیے':'liye','والا':'wala','والی':'wali','دیکھو':'dekho','ویڈیو':'video','چینل':'channel','سبسکرائب':'subscribe','لائک':'like','شیئر':'share','شکریہ':'shukriya','اللہ':'Allah','پاکستان':'Pakistan','خوش':'khush','دوست':'dost','چلو':'chalo','پھر':'phir','بس':'bas','ایک':'aik','دو':'do','کچھ':'kuch','ابھی':'abhi','میرا':'mera','میری':'meri','میرے':'mere','تمہارا':'tumhara','ان':'in','اس':'is','جب':'jab','لیکن':'lekin','مگر':'magar','کہ':'ke','گیا':'gaya','گئی':'gayi','رہا':'raha','رہی':'rahi','رہے':'rahe','سکتے':'sakte','چاہیے':'chahiye','زندگی':'zindagi','دن':'din','رات':'raat','پیار':'pyar','دل':'dil'};
 const UC={'ا':'a','آ':'aa','ب':'b','پ':'p','ت':'t','ٹ':'t','ث':'s','ج':'j','چ':'ch','ح':'h','خ':'kh','د':'d','ڈ':'d','ذ':'z','ر':'r','ڑ':'r','ز':'z','ژ':'zh','س':'s','ش':'sh','ص':'s','ض':'z','ط':'t','ظ':'z','ع':'a','غ':'gh','ف':'f','ق':'q','ک':'k','ك':'k','گ':'g','ل':'l','م':'m','ن':'n','ں':'n','و':'o','ہ':'h','ھ':'h','ء':'','ی':'i','ي':'i','ے':'e','ئ':'i','ة':'a','ۂ':'h','َ':'a','ِ':'i','ُ':'u','ّ':'','ْ':'','،':',','۔':'.','؟':'?','٪':'%'};
 const AR=/[\u0600-\u06FF]/;
-function urWord(w){if(UW[w])return UW[w];let o='';const L=[...w];for(let i=0;i<L.length;i++){const c=L[i],n=UC[c];if(n==null){o+=c;continue}
-  if(c==='و'||c==='ی'){o+=(i===0?(c==='و'?'w':'y'):(c==='و'?(i===L.length-1?'o':'o'):(i===L.length-1?'i':'ee')));continue}
-  if(c==='ہ'&&i===L.length-1&&i>0){o+='a';continue}o+=n}
- return o.replace(/aa+/g,'aa')}
+/* v23.5: Urdu script -> Roman Urdu with readable vowels: Arabic-letter variants folded (ي ك ه), Urdu digits, alif aa/a, ein/ai endings, a guessed short "a" after the first consonant, more common words */
+Object.assign(UW,{'السلام':'assalam','علیکم':'alaikum','وعلیکم':'wa alaikum','پہلے':'pehle','بعد':'baad','آخر':'aakhir','اپنی':'apni','ضرور':'zaroor','ضروری':'zaroori','پسند':'pasand','سمجھ':'samajh','بات':'baat','لوگ':'log','لوگوں':'logon','آواز':'awaaz','بغیر':'baghair','غیر':'ghair','تاکہ':'taake','اگر':'agar','آئی':'aayi','آیا':'aaya','آئے':'aaye','حصے':'hisse','حصہ':'hissa','محفوظ':'mehfooz','کیپشن':'caption','کیپشنز':'captions','ایپ':'app','ایڈٹ':'edit','ایڈیٹ':'edit','موبائل':'mobile','فون':'phone','ویڈیوز':'videos','ویدیو':'video','ویڈیوں':'video','وڈیو':'video','دوستو':'dosto','شامل':'shamil','کام':'kaam','وقت':'waqt','سال':'saal','ہوتا':'hota','ہوتی':'hoti','ہوتے':'hote','جاتا':'jata','جاتی':'jati','جاتے':'jate','کہا':'kaha','کرنا':'karna','کرنے':'karne','کرتے':'karte','دیں':'dein','لیں':'lein','پاس':'paas','ساتھ':'saath','طرح':'tarah','بارے':'baare','اچھے':'ache','نئی':'nayi','نیا':'naya','نئے':'naye','ہر':'har','کوئی':'koi','کسی':'kisi','یہاں':'yahan','وہاں':'wahan','ایسے':'aise','پیسے':'paise','گھر':'ghar','دنیا':'duniya','کہتے':'kehte','چاہتے':'chahte','مجھ':'mujh','انشاءاللہ':'InshaAllah','ماشاءاللہ':'MashaAllah','میں':'mein'});
+const UFOLD={'ي':'ی','ى':'ی','ك':'ک','ه':'ہ','ۀ':'ہ','ۂ':'ہ','ؤ':'و','أ':'ا','إ':'ا','ٱ':'ا'},UDIG='۰۱۲۳۴۵۶۷۸۹',UVOW='اآویےئع';
+function urWord(w){w=[...w].map(c=>UFOLD[c]||c).join('').replace(/[\u064B-\u0652\u0654\u0670]/g,'');if(UW[w])return UW[w];
+ const L=[...w],n=L.length;let o='';
+ for(let i=0;i<n;i++){const c=L[i],p=L[i-1],x=L[i+1],end=i===n-1;
+  if(UDIG.includes(c)){o+=UDIG.indexOf(c);continue}
+  if(c==='ھ'){o+='h';continue}
+  if(c==='ا'){o+=i===0||end||x==='ئ'?'a':'aa';continue}
+  if(c==='آ'){o+='aa';continue}
+  if(c==='ئ'){if(x==='ی'&&L[i+2]==='ں'){o+='ein';i+=2;continue}if(x==='ے'){o+='e';i++;continue}if(x==='ی'){o+=(p==='ا'||p==='و')?'yi':'i';i++;continue}o+='i';continue}
+  if(c==='و'){o+=(i===0||(x&&'اآیے'.includes(x)))?'w':'o';continue}
+  if(c==='ی'){if(i===0){o+='y';continue}if(x==='ں'&&i===n-2){o+='ein';i++;continue}if(x&&'اے'.includes(x)){o+='y';continue}if(x==='و'){o+=i===n-2?'i':'ee';continue}o+=end?'i':'ee';continue}
+  if(c==='ے'){o+='e';continue}
+  if(c==='ع'){o+=i===0?'a':'';continue}
+  if(c==='ہ'&&end&&i>0){o+='a';continue}
+  const r=UC[c];if(r==null){o+=c;continue}o+=r;
+  if(i===0&&x&&!UVOW.includes(x)&&x!=='ھ'&&x!=='ں'&&n>2)o+='a'}   // first short vowel is not written in Urdu: psnd -> pasnd, mhnt -> mahnt
+ return o.replace(/a{3,}/g,'aa')}
 window.urduToRoman=function(str){return String(str).split(/(\s+)/).map(t=>{if(!AR.test(t))return t;const m=t.match(/^([\u0600-\u06FF]+)(.*)$/);return m?urWord(m[1].replace(/[،۔؟]/g,''))+(t.match(/[،۔؟]/)?({'،':',','۔':'.','؟':'?'})[t.match(/[،۔؟]/)[0]]:'')+m[2].replace(/[\u0600-\u06FF،۔؟]/g,''):t}).join('')};
 if(typeof devaToRoman==='function'){const _d=devaToRoman;devaToRoman=function(str){let s=String(str||'');if(AR.test(s))s=urduToRoman(s);return _d.call(this,s)}}
 /* 4) three direct buttons: Urdu, Roman English, English -> one tap generates */
@@ -5309,7 +5350,7 @@ async function pxCaptionsFromAudio(ab,pt0,m){const pcm=await pxTo16k(ab);capJob+
 
 /* =================== VOICE OVER =================== */
 const VX={st:'idle',rec:null,stream:null,chunks:[],ab:null,pt0:0,t0:0,acc:0,raf:0,vol0:null,blob:null,takes:0};
-const VOICES=[['ur-PK-AsadNeural','Urdu - Asad (male)'],['ur-PK-UzmaNeural','Urdu - Uzma (female)'],['en-US-AndrewMultilingualNeural','English - Andrew (male)'],['en-US-AvaMultilingualNeural','English - Ava (female)'],['en-GB-RyanNeural','English UK - Ryan'],['en-IN-PrabhatNeural','English India - Prabhat'],['hi-IN-MadhurNeural','Hindi - Madhur (male)'],['hi-IN-SwaraNeural','Hindi - Swara (female)'],['ar-SA-HamedNeural','Arabic - Hamed'],['pa-IN-OjasNeural','Punjabi - Ojas']];
+const VOICES=[['ur-PK-AsadNeural','Urdu - Asad (male)'],['ur-PK-UzmaNeural','Urdu - Uzma (female)'],['en-US-AndrewMultilingualNeural','English - Andrew (male)'],['en-US-AvaMultilingualNeural','English - Ava (female)'],['en-GB-RyanNeural','English UK - Ryan'],['en-IN-PrabhatNeural','English India - Prabhat'],['hi-IN-MadhurNeural','Hindi - Madhur (male)'],['hi-IN-SwaraNeural','Hindi - Swara (female)'],['ar-SA-HamedNeural','Arabic - Hamed'],['ur-IN-SalmanNeural','Urdu (India) - Salman (male)'],['ur-IN-GulNeural','Urdu (India) - Gul (female)'],['ps-AF-GulNawazNeural','Pashto - Gul Nawaz (male)']];
 function vxOpen(){if(!S.segs||!S.segs.length){toast('Add a video first, then record your voice over it.');return}
  const d=pxDlg('pxVx',`<h3>&#127897; Voice over</h3><p>Speak while your video plays. Your voice lands on its own track under the video, ready to move, trim or delete.</p>
  <h4>Record</h4>
@@ -5344,6 +5385,8 @@ function vxOpen(){if(!S.segs||!S.segs.length){toast('Add a video first, then rec
  $('vxAdd').onclick=()=>vxCommit().catch(e=>{console.error(e);st('Could not add the voice: '+(e.message||e))});
  $('vxGen').onclick=()=>vxTts().catch(e=>{console.error(e);st('AI voice failed: '+(e.message||e))});
  d.addEventListener('close',()=>{vxTestStop()},{once:true});
+ /* v23.5: AI voice needs the Windows app (Microsoft voices are reached through the PC): say so up front instead of after a tap */
+ if(!DESK){const g=$('vxGen');g.disabled=true;g.textContent='Windows app only';g.title='AI voices work in the Cutloom Windows app';const t=$('vxTts');t.disabled=true;t.placeholder='AI voices (Urdu, English, Hindi) work in the Cutloom Windows app. Here, record your own voice above or upload a voice file.'}
  d.showModal();st(DESK?'Tip: headphones stop the video sound from leaking into your mic.':'Tip: headphones stop the video sound from leaking into your mic. AI voice works in the Windows app.')}
 const vxOpts=()=>({clean:$('vxClean').checked,studio:$('vxStudio').checked,even:$('vxEven').checked,fx:val('vxFx')});
 async function vxStream(){const id=val('vxMic');return navigator.mediaDevices.getUserMedia({audio:{deviceId:id?{exact:id}:undefined,echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}})}
@@ -5607,6 +5650,8 @@ async function aeRun(){const btn=$('aeGo');if(btn.disabled)return;btn.disabled=t
 
 /* ---------- captions behind the person (person cut-out drawn over the captions) ---------- */
 const BH={seg:null,loading:null,failed:false,snap:null,small:null,maskC:null,person:null,key:'',ok:false};
+/* v23.5: MediaPipe prints its start-up info ("INFO: Created TensorFlow Lite XNNPACK delegate") through console.error: keep the console clean */
+{const _ce=console.error.bind(console);console.error=function(...a){const m=typeof a[0]==='string'?a[0]:'';if(/^(INFO|I\d{4}|W\d{4}): |XNNPACK delegate|^Graph successfully started/.test(m))return;return _ce(...a)}}
 function bhLoad(){if(BH.seg||BH.failed)return Promise.resolve(BH.seg);if(BH.loading)return BH.loading;
  BH.loading=(async()=>{try{const m=await import('/vendor/mp/vision_bundle.mjs');const fs=await m.FilesetResolver.forVisionTasks('/vendor/mp/wasm');
    BH.seg=await m.ImageSegmenter.createFromOptions(fs,{baseOptions:{modelAssetPath:'/vendor/mp/selfie.tflite',delegate:'CPU'},runningMode:'IMAGE',outputCategoryMask:false,outputConfidenceMasks:true});return BH.seg}
@@ -5633,7 +5678,7 @@ Object.assign(CAP,{behind:{...CD,capFont:'Impact, sans-serif',capW:'900',capSz:1
 
 /* =================== EXTRAS =================== */
 function xtOpen(){const d=pxDlg('pxXt',`<h3>&#10024; Extras</h3>
- <h4>Sound effects</h4><p>Made on your PC, free to use. Added at the playhead.</p><div class="pxchip" id="xtSfx">${Object.keys(SFX).map(k=>'<button class="btn sm" type="button" data-k="'+k+'">'+SFX[k][0]+'</button>').join('')}</div>
+ <h4>Sound effects</h4><p>Made on this device, free to use. Added at the playhead.</p><div class="pxchip" id="xtSfx">${Object.keys(SFX).map(k=>'<button class="btn sm" type="button" data-k="'+k+'">'+SFX[k][0]+'</button>').join('')}</div>
  <h4>Music bed</h4><div class="row"><select id="xtMood">${Object.keys(MOOD).map(k=>'<option>'+k+'</option>').join('')}</select><button class="btn sm" type="button" id="xtMus">Add music under the whole video</button></div>
  <h4>Captions</h4><div class="row"><button class="btn sm" type="button" id="xtEmo">Add emojis to captions</button><button class="btn sm" type="button" id="xtNoEmo">Remove emojis</button></div>
  <h4>Thumbnail maker</h4><div class="row"><input type="text" id="xtThT" placeholder="Big title on the thumbnail" style="flex:1"></div>
@@ -5702,7 +5747,7 @@ const upEsc=x=>String(x||'').replace(/[<>&"]/g,'');
 function upBar(){let bar=$('pxUp');if(!bar){bar=pxEl('<div id="pxUp" style="position:fixed;right:16px;bottom:16px;z-index:9990;background:var(--card);color:var(--tx);border:1px solid var(--ac);border-radius:12px;padding:12px 14px;box-shadow:0 10px 30px rgba(0,0,0,.45);width:320px;font-size:13px"></div>');document.body.appendChild(bar)}return bar}
 let upPoll=0;
 function upShowReady(j){const bar=upBar();bar.innerHTML='';const t=document.createElement('div');t.innerHTML='<b>Cutloom '+upEsc(j.version)+' is ready to install</b>';
- const n=document.createElement('div');n.style.cssText='color:var(--mu);margin:4px 0 10px';n.textContent=(j.notes?String(j.notes).slice(0,200)+' ':'')+'It installs in a few seconds and Cutloom reopens. If you choose Later, it installs when you close Cutloom.';
+ const n=document.createElement('div');n.style.cssText='color:var(--mu);margin:4px 0 10px';n.textContent=(j.notes?String(j.notes).slice(0,200)+' ':'')+'It installs in a few seconds and Cutloom reopens. If you choose Later, it installs when you close Cutloom.';try{fetch('/api/selfupdate',{cache:'no-store'}).then(r=>r.json()).then(st=>{if(st.kind==='patch')n.textContent=n.textContent.replace('It installs','Only the changed parts were downloaded. It installs')})}catch(_){}
  const row=document.createElement('div');row.style.cssText='display:flex;gap:8px';const g=document.createElement('button');g.className='btn pri sm';g.textContent='Restart and update';
  g.onclick=async()=>{g.disabled=true;g.textContent='Saving your project...';try{if(typeof saveProject==='function')await saveProject()}catch(_){}g.textContent='Updating...';
   try{const r=await fetch('/api/selfupdate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'install'})});const st=await r.json();if(st.error){toast('Could not start the update: '+st.error,6000);g.disabled=false;g.textContent='Restart and update'}else toast('Updating Cutloom. It will open again in a few seconds.',8000)}catch(e){}};
@@ -5713,21 +5758,26 @@ function upShowManual(j){const bar=upBar();bar.innerHTML='';const t=document.cre
 async function upFollow(j,manual){clearInterval(upPoll);let shown=false;
  const tick=async()=>{let st;try{st=await (await fetch('/api/selfupdate',{cache:'no-store'})).json()}catch(_){return}
   if(st.state==='ready'){clearInterval(upPoll);upShowReady(j);return}
-  if(st.state==='error'){clearInterval(upPoll);if(manual)toast('Update download failed: '+st.error,6000);upShowManual(j);return}
-  if(manual||shown){shown=true;const bar=upBar();const pct=st.total?Math.floor(st.got/st.total*100):0;bar.innerHTML='<b>Downloading Cutloom '+upEsc(j.version)+'</b><div style="color:var(--mu);margin:4px 0 8px">'+(st.total?pct+'% of '+Math.round(st.total/1048576)+' MB':Math.round(st.got/1048576)+' MB')+'. You can keep editing.</div><div style="height:4px;background:var(--line,#333);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:var(--ac)"></div></div>'}};
+  if(st.state==='error'){clearInterval(upPoll);
+   /* v23.5: the small patch did not work here: fall back to the full setup automatically */
+   if(st.kind==='patch'&&!j._full){j._full=true;try{const r3=await fetch('/api/selfupdate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'download',fullOnly:true,url:j.setup,parts:j.parts,size:j.size||0,version:j.version})});await r3.json()}catch(_){}upFollow(j,manual);return}
+   if(manual)toast('Update download failed: '+st.error,6000);upShowManual(j);return}
+  if(manual||shown){shown=true;const bar=upBar();const pct=st.total?Math.floor(st.got/st.total*100):0;bar.innerHTML='<b>Downloading Cutloom '+upEsc(j.version)+(st.kind==='patch'?' (update patch)':'')+'</b><div style="color:var(--mu);margin:4px 0 8px">'+(st.total?pct+'% of '+Math.round(st.total/1048576)+' MB':Math.round(st.got/1048576)+' MB')+'. You can keep editing.</div><div style="height:4px;background:var(--line,#333);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:var(--ac)"></div></div>'}};
  upPoll=setInterval(tick,1500);tick()}
-async function upCheck(manual){if(!DESK){if(manual)toast('Updates are for the Windows app.');return}
+async function upCheck(manual){if(!DESK){if(window.CutloomNative&&window.CutloomNative.liveCheck){window.CutloomNative.liveCheck(!!manual);return}if(manual)toast('The website is always the newest version. Updates are for the Windows and Android apps.');return}
  try{const r=await fetch('/api/update',{cache:'no-store'});const j=await r.json();if(!j||!j.version){if(manual)toast('Could not reach the update page. Check your internet.',5000);return}
   const cur=window.CUTLOOM_PLUS.version;if(vNum(j.version)<=vNum(cur)){if(manual)toast('You have the newest Cutloom ('+cur+').',4000);return}
   const hasParts=Array.isArray(j.parts)&&j.parts.length;if(localStorage.getItem('cutloom.autoUpdate')==='0'||!(j.setup||hasParts)){if(!manual&&localStorage.getItem('cutloom.upSkip')===j.version)return;upShowManual(j);return}
   const s0=await (await fetch('/api/selfupdate',{cache:'no-store'})).json().catch(()=>({}));
-  if(!(s0.version===j.version&&(s0.state==='downloading'||s0.state==='ready'))){const r2=await fetch('/api/selfupdate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'download',url:j.setup,parts:hasParts?j.parts:undefined,size:j.size||0,version:j.version})});const st=await r2.json();if(st.error){if(manual)toast('Could not download the update: '+st.error,6000);upShowManual(j);return}}
+  if(!(s0.version===j.version&&(s0.state==='downloading'||s0.state==='ready'))){const r2=await fetch('/api/selfupdate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'download',url:j.setup,parts:hasParts?j.parts:undefined,size:j.size||0,version:j.version,
+   /* v23.5: 23.5+ installs take the small patch when it was made for this version line */
+   patch:j.patch&&j.patch.version===j.version&&vNum(cur)>=vNum(j.patch.min||j.version)&&vNum(cur)<vNum(j.version)?j.patch:undefined})});const st=await r2.json();if(st.error){if(manual)toast('Could not download the update: '+st.error,6000);upShowManual(j);return}}
   if(manual)toast('Downloading Cutloom '+j.version+' in the background.',4000);upFollow(j,manual)}
  catch(e){if(manual)toast('Could not check for updates: '+(e.message||e),5000)}}
 setTimeout(()=>upCheck(false),8000);setInterval(()=>upCheck(false),6*3600*1000);
 document.addEventListener('keydown',e=>{if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;if(e.altKey&&(e.key==='v'||e.key==='V')){e.preventDefault();vxOpen()}if(e.altKey&&(e.key==='a'||e.key==='A')){e.preventDefault();aeOpen()}});
 try{if(DESK)document.querySelectorAll('.webonly').forEach(e=>e.remove())}catch(_){}
-window.CUTLOOM_PLUS={version:'23.4.0',vxOpen,aeOpen,xtOpen,qrOpen,upCheck,_x:{get S(){return S},get CAPE(){return CAPE},projTotal,a16:(f,a,b)=>audio16kFrom(f,a,b),srcFile:id=>srcFile(id)}};
+window.CUTLOOM_PLUS={version:'23.5.0',vxOpen,aeOpen,xtOpen,qrOpen,upCheck,_x:{get S(){return S},get CAPE(){return CAPE},get BH(){return BH},projTotal,a16:(f,a,b)=>audio16kFrom(f,a,b),srcFile:id=>srcFile(id)}};
 }
 
 /* =================== v23.4: phone layout, equal icons, smoother =================== */
@@ -5767,8 +5817,15 @@ window.CUTLOOM_PLUS={version:'23.4.0',vxOpen,aeOpen,xtOpen,qrOpen,upCheck,_x:{ge
  .pxd{width:calc(100vw - 16px)!important;max-width:calc(100vw - 16px)!important;max-height:calc(100dvh - 24px)!important}
  .aetpl{grid-template-columns:1fr 1fr!important}
  .aetpl button{padding:8px!important;font-size:11.5px!important}
+ /* v23.5: the 10 templates as compact two-column tiles (title only) so Length, Platform and the Auto Edit button are reachable without a long scroll; the picked template's description shows under the grid */
+ .aetpl{grid-template-columns:1fr 1fr!important;gap:6px!important}
+ .aetpl button{font-size:0!important;padding:9px 8px!important;min-height:40px;display:flex!important;align-items:center;gap:6px}
+ .aetpl button b{font-size:12.5px!important;margin:0!important;line-height:1.2}
+ .aetpl button i{float:none!important;order:-1;font-size:17px!important}
+ /* Preview / Source switch: compact so it does not cover the picture */
+ body.editing .tabs.seg:has(>[data-view]){transform:scale(.82);transform-origin:top left;opacity:.9;top:4px!important;left:4px!important}
 }
-@media(max-width:380px){.aetpl{grid-template-columns:1fr!important}html body.editing aside.card .ptabs>*{flex-basis:58px!important;min-width:58px!important}}
+@media(max-width:380px){html body.editing aside.card .ptabs>*{flex-basis:58px!important;min-width:58px!important}}
 /* smoother: no hover animations on touch, lighter shadows/blur on phones */
 @media(pointer:coarse){*{scroll-behavior:auto}}
 @media(max-width:899px){body.editing *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}}
@@ -5802,6 +5859,146 @@ if(!DESK&&!window.Capacitor){const btns=()=>[...document.querySelectorAll('#hDl.
   setInterval(()=>{if(!pend)return;const el=$(box);if(document.body.classList.contains('editing')&&el&&el.offsetParent)(window.requestIdleCallback||setTimeout)(run)},600);return w};
  try{drawCapCards=lazy('cap',drawCapCards,'capPre')}catch(_){}
  try{tplDrawAll=lazy('tpl',tplDrawAll,'tplGrid')}catch(_){}}
+
+/* =================== v23.5: streaming sound reader, phone captions + export, share panel, low storage, MP3 =================== */
+/* ---------- 1) sound straight from MP4/MOV files in pieces (WebCodecs AudioDecoder), never the whole file in memory ---------- */
+function clAacDesc(mp4,id){try{const e=mp4.getTrackById(id).mdia.minf.stbl.stsd.entries[0];const f=d=>{if(!d)return null;if(d.tag===5&&d.data)return d.data;for(const c of (d.descs||[])){const r=f(c);if(r)return r}return null};return e.esds?f(e.esds.esd):null}catch(_){return null}}
+function clResampler(inR,outR,ch){let t=0;const prev=new Float32Array(ch),step=inR/outR;
+ return planes=>{const n=planes[0].length,outs=[];if(!n)return planes.map(()=>new Float32Array(0));const est=Math.ceil((n+1)/step)+2;for(let c=0;c<ch;c++)outs.push(new Float32Array(est));let k=0;
+  while(t<n-1){const i=Math.floor(t),f=t-i;for(let c=0;c<ch;c++){const P=planes[c],x0=i<0?prev[c]:P[i],x1=P[i+1];outs[c][k]=x0+(x1-x0)*f}k++;t+=step}
+  t-=n;for(let c=0;c<ch;c++)prev[c]=planes[c][n-1];return outs.map(o=>o.subarray(0,k))}}
+/* decodes the first audio track of an MP4/MOV/M4A between a and b seconds. onPcm(planes Float32Array[], rate) gets resampled pieces. */
+async function clAudioStream(file,a,b,outRate,outCh,onPcm,onProg,signal){
+ if(!window.AudioDecoder||!window.EncodedAudioChunk)throw new Error('no AudioDecoder');if(!window.MP4Box)await loadScript(MP4BOX_URL);
+ const mp4=MP4Box.createFile();let info=null,at=null,err=null;const q=[];
+ mp4.onError=e=>{err=new Error('mp4box: '+e)};
+ mp4.onReady=i=>{info=i;at=i.audioTracks&&i.audioTracks[0];if(at){mp4.setExtractionOptions(at.id,null,{nbSamples:500});mp4.start()}};
+ mp4.onSamples=(id,u,ss)=>{for(const s of ss)q.push({cts:s.cts,ts:s.timescale,dur:s.duration,sync:s.is_sync,data:s.data});try{mp4.releaseUsedSamples(id,ss[ss.length-1].number+1)}catch(_){}};
+ const B=isFinite(+b)&&+b>0?+b:1e9,end=()=>{const l=q[q.length-1];return !!l&&l.cts/l.ts>B+.5};
+ await clMp4Stream(file,mp4,()=>!!info,()=>Math.max(0,(+a||0)-.2),end,()=>!!err);
+ if(err)throw err;if(!at)throw Object.assign(new Error('this video has no sound track'),{noAudio:1});
+ const sr=at.audio.sample_rate,nch=at.audio.channel_count||2,cfg={codec:at.codec,sampleRate:sr,numberOfChannels:nch};const desc=clAacDesc(mp4,at.id);if(desc)cfg.description=desc;
+ try{const sup=await AudioDecoder.isConfigSupported(cfg);if(!sup.supported)throw 0}catch(_){throw new Error('this phone cannot decode '+at.codec+' sound')}
+ const rs=clResampler(sr,outRate,outCh);let derr=null,t0=null,got=0;const A=+a||0;
+ const dec=new AudioDecoder({output:ad=>{try{const n=ad.numberOfFrames,ch=ad.numberOfChannels,ts=ad.timestamp/1e6;if(t0==null)t0=ts;
+   if(ts+n/ad.sampleRate<A||ts>B){ad.close();return}
+   const pl=[];for(let c=0;c<ch;c++){const x=new Float32Array(n);ad.copyTo(x,{planeIndex:c,format:'f32-planar'});pl.push(x)}ad.close();
+   let use;if(outCh===1){const m=new Float32Array(n);for(const x of pl)for(let i=0;i<n;i++)m[i]+=x[i]/pl.length;use=[m]}else{use=[pl[0],pl[1]||pl[0]]}
+   /* trim the first piece to start exactly at a */
+   if(ts<A){const cut=Math.min(n,Math.round((A-ts)*ad.sampleRate));use=use.map(x=>x.subarray(cut))}
+   const o=rs(use);got+=o[0].length;onPcm(o)}catch(e){derr=e}},error:e=>{derr=e}});
+ dec.configure(cfg);
+ for(let i=0;i<q.length;i++){if(signal&&signal.aborted)throw Object.assign(new Error('cancelled'),{name:'AbortError'});if(derr)throw derr;const s=q[i];
+  dec.decode(new EncodedAudioChunk({type:'key',timestamp:Math.round(s.cts/s.ts*1e6),duration:Math.round(s.dur/s.ts*1e6),data:s.data}));q[i]=null;
+  if(dec.decodeQueueSize>32)await new Promise(r=>setTimeout(r,0));if(onProg&&i%200===0)onProg(i/q.length)}
+ await withTimeout(dec.flush(),30000).catch(()=>{});try{dec.close()}catch(_){}if(derr)throw derr;
+ const wantN=Math.round(((Math.min(B,(at.duration/at.timescale)||B))-A)*outRate);return {rate:outRate,frames:got,expected:wantN,codec:at.codec}}
+/* captions (and Auto Edit) sound in the browser and the Android app: streamed for MP4/MOV, the old way for other files */
+{const _a16=audio16kFrom;
+ audio16kFrom=async function(file,a,b){if(!DESK&&file&&clStreamable(file)&&window.AudioDecoder){try{const parts=[];let n=0;const r=await clAudioStream(file,a,b,16000,1,o=>{parts.push(o[0]);n+=o[0].length});
+     if(n<1600)throw new Error('no sound decoded');const B=isFinite(+b)&&+b>0?+b:0,lim=B?Math.min(n,Math.round((B-(+a||0))*16000)):n,pcm=new Float32Array(lim);let o=0;for(const p of parts){if(o>=lim)break;const k=Math.min(p.length,lim-o);pcm.set(p.subarray(0,k),o);o+=k}
+     S.lastAudioPath='stream';return {pcm,buf:null}}
+   catch(e){if(e&&e.noAudio)throw e;console.warn('[sound] streaming reader failed, decoding the whole file',e);S.lastAudioPath='fallback: '+((e&&e.message)||e)}}
+  return _a16(file,a,b)}}
+/* MP3 from MP4/M4A sound without decoding the whole file at once (YouTube "Audio only" on phones, Downloader) */
+{const _mp3=toMp3;
+ toMp3=async function(blob,onp,signal){const f=blob instanceof File?blob:new File([blob],'audio.m4a',{type:blob.type||'audio/mp4'});
+  if(window.AudioDecoder&&(clStreamable(f)||/mp4|m4a/.test(blob.type||''))){try{const lame=await lameLoad();onp(0,'Reading the sound...');let enc=null,ch=2;const out=[];let last=performance.now(),rate=0;
+    const i16=a=>{const o=new Int16Array(a.length);for(let i=0;i<a.length;i++){const s=Math.max(-1,Math.min(1,a[i]));o[i]=s<0?s*32768:s*32767}return o};
+    /* lamejs supports 32/44.1/48 kHz: keep 44.1 or 48 as it is */
+    const r=await clAudioStream(f,0,0,48000,2,pl=>{if(!enc)enc=new lame.Mp3Encoder(2,48000,192);const L=i16(pl[0]),R=i16(pl[1]);for(let i=0;i<L.length;i+=1152*16){const b=enc.encodeBuffer(L.subarray(i,i+1152*16),R.subarray(i,i+1152*16));if(b.length)out.push(new Uint8Array(b))}},p=>{if(performance.now()-last>200){last=performance.now();onp(p*.98,'Encoding MP3 '+Math.round(p*100)+'%')}},signal);
+    if(!enc)throw new Error('no sound decoded');const e=enc.flush();if(e.length)out.push(new Uint8Array(e));onp(1,'MP3 ready');
+    return {blob:new Blob(out,{type:'audio/mpeg'}),dur:r.frames/48000,ch:2,sr:48000}}
+   catch(e){if(e&&e.name==='AbortError')throw e;console.warn('[mp3] streaming encoder failed, using the whole-file decoder',e)}}
+  return _mp3(blob,onp,signal)}}
+
+/* ---------- 2) phone export: 720p / 30 fps by default, sensible bitrate, smaller "save space" export ---------- */
+{const _ef=window.exportFps;if(typeof _ef==='function'){window.exportFps=exportFps=async function(segs){let f=+(await _ef.apply(this,arguments));if(!isFinite(f)||f<=0)f=30;
+  if((IS_PHONE()||S.smallExport)&&val('fps')==='auto'&&f>30)f=30;S.lastFps=f;return f}}}
+{const _os=outScale;outScale=function(vw,vh){const px=Math.max(1,S.W*S.H);if(S.smallExport)return Math.min(1,Math.sqrt(518400/px));
+  if(IS_PHONE()&&val('exSpeed')!=='best'&&val('resS')==='auto')return Math.min(1,Math.sqrt(921600/px));return _os(vw,vh)}}
+/* v23.5: the smaller copy setting lasts until that export ends (it was reset after 0.5 s, before slow phones even started encoding) */
+{const _re=runExports;runExports=async function(items){if(S.exporting)return;try{return await _re.apply(this,arguments)}finally{S.smallExport=false}}}
+{const _bf=bitsFor;bitsFor=function(segs){const b=_bf(segs);if(S.smallExport)return Math.min(b,1.8e6);if(IS_PHONE()&&val('exSpeed')!=='best')return Math.min(b,4.5e6);return b}}
+
+/* ---------- 3) Share panel after export + low storage handling ---------- */
+const SHARE_T={youtube:{n:'YouTube Shorts',u:'https://www.youtube.com/upload',pk:['com.google.android.youtube']},tiktok:{n:'TikTok',u:'https://www.tiktok.com/tiktokstudio/upload',pk:['com.zhiliaoapp.musically','com.ss.android.ugc.trill']},
+ instagram:{n:'Instagram Reels',u:'https://www.instagram.com/',pk:['com.instagram.android']},facebook:{n:'Facebook Reels',u:'https://www.facebook.com/reels/create',pk:['com.facebook.katana']},whatsapp:{n:'WhatsApp',u:'https://web.whatsapp.com/',pk:['com.whatsapp','com.whatsapp.w4b']}};
+const NATIVE=()=>!!(window.Capacitor&&window.CutloomNative&&window.CutloomNative.share);
+/* title + description + hashtags from the captions (same words as Extras > Title, description and hashtags) */
+function seoText(){const txt=(S.caps||[]).map(c=>c.t).join(' ').replace(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/gu,'').trim(),topic=(($('xtTopic')||{}).value||'').trim();
+ const stop=new Set('the a an and or but to of in on for is are was were it this that with you i we they he she my your our me be have has had do does did not no yes so just like can will at as from by about what when how why who which there their then than kya hai hain ka ki ke ko se mein main ye yeh wo woh aur bhi tha thi na nahi to toh hum ap aap'.split(' '));
+ const freq={};txt.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).forEach(w=>{if(w.length>3&&!stop.has(w))freq[w]=(freq[w]||0)+1});const top=Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,6).map(x=>x[0]);
+ const T=s=>s.replace(/\b\w/g,c=>c.toUpperCase()),k=topic||top.slice(0,3).join(' ')||String(baseName()||'').replace(/[_\-.]+/g,' ').trim();
+ const tags=[...new Set([...(topic?topic.toLowerCase().split(/\s+/):[]),...top].map(w=>'#'+w.replace(/[^\p{L}\p{N}]/gu,'')).filter(w=>w.length>2))].concat(['#shorts','#reels','#viral']).slice(0,10);
+ const title=T(k).slice(0,90),desc=txt?txt.split(/\s+/).slice(0,30).join(' ')+(txt.split(/\s+/).length>30?'...':''):'';
+ return {title,desc,tags,text:title+'\n\n'+(desc?desc+'\n\n':'')+tags.join(' ')}}
+async function copyText(t){try{await navigator.clipboard.writeText(t);return true}catch(_){try{const ta=document.createElement('textarea');ta.value=t;ta.style.cssText='position:fixed;opacity:0';document.body.appendChild(ta);ta.select();const ok=document.execCommand('copy');ta.remove();return ok}catch(__){return false}}}
+const SH={saved:null,cache:null,apps:null};
+function shareEl(){let el=$('pxShare');if(el)return el;el=document.createElement('div');el.id='pxShare';el.className='pxshare';
+ el.innerHTML='<h4 style="margin:12px 0 6px">Share your Short</h4><div class="pxsh-btns">'+
+  '<button class="btn pri" type="button" data-sh="system">Share…</button>'+Object.entries(SHARE_T).map(([k,o])=>'<button class="btn" type="button" data-sh="'+k+'">'+o.n+'</button>').join('')+'</div>'+
+  '<div class="pxsh-save hidden"><button class="btn" type="button" data-sh="save">Save to phone</button><button class="btn" type="button" data-sh="cache">Share without saving</button><button class="btn" type="button" data-sh="small">Export smaller</button></div>'+
+  '<div class="note pxsh-msg" role="status" aria-live="polite"></div>'+
+  '<label class="note" style="display:block;margin-top:8px">Title, caption and hashtags (copied when you share)</label><textarea class="pxsh-txt" rows="4" style="width:100%;font-size:12.5px"></textarea>'+
+  '<div class="note pxsh-how" style="margin-top:6px"></div>';
+ const st=document.createElement('style');st.textContent='.pxshare .pxsh-btns,.pxshare .pxsh-save{display:flex;flex-wrap:wrap;gap:6px}.pxshare .pxsh-btns .btn,.pxshare .pxsh-save .btn{flex:1 1 130px;justify-content:center;min-height:38px}.pxshare .pxsh-save{margin-top:6px}.pxshare .pxsh-msg{margin-top:6px}.pxshare .pxsh-msg.err{color:#f87171}';
+ document.head.appendChild(st);const d=$('done');d.appendChild(el);
+ el.addEventListener('click',e=>{const b=e.target.closest('[data-sh]');if(b)shareDo(b.dataset.sh,b)});return el}
+function shMsg(t,err){const m=document.querySelector('#pxShare .pxsh-msg');if(m){m.textContent=t||'';m.classList.toggle('err',!!err)}}
+function shLast(){return S.results[S.results.length-1]}
+async function shSpaceNote(r){if(NATIVE()){const fr=await window.CutloomNative.freeSpace();if(fr>=0&&fr<r.blob.size+50e6)return 'Your phone has only '+Math.round(fr/1048576)+' MB free and this video is '+Math.round(r.blob.size/1048576)+' MB.';return ''}
+ try{const e=await navigator.storage.estimate();if(e&&e.quota&&e.quota-e.usage<r.blob.size*1.5)return 'This browser has little storage left ('+Math.round((e.quota-e.usage)/1048576)+' MB).'}catch(_){}return ''}
+function shShowSaveRow(on){const r=document.querySelector('#pxShare .pxsh-save');if(r)r.classList.toggle('hidden',!on)}
+async function shareDo(kind,btn){const r=shLast();if(!r)return;const seo=seoText(),txt=(document.querySelector('#pxShare .pxsh-txt')||{}).value||seo.text,file=new File([r.blob],r.fn,{type:r.blob.type||'video/mp4'});
+ try{if(btn)btn.disabled=true;
+  if(kind==='small'){S.smallExport=true;shMsg('Exporting a smaller copy (540p, about '+Math.max(1,Math.round(r.blob.size/1048576/3))+' MB)...');setTimeout(()=>{$('go').click()},50);return}
+  if(kind==='save'){if(!NATIVE()){saveBlobAs(file,r.fn);return}shMsg('Saving...');const where=await window.CutloomNative.saveToDevice(file,r.fn);SH.saved={fn:r.fn,where};shMsg('Saved to '+where+'.');shShowSaveRow(false);return}
+  const copied=await copyText(txt);
+  if(NATIVE()){/* phone app: the saved gallery copy, or a temporary copy in the app cache ("share without saving") */
+   let target=null;
+   if(SH.saved&&SH.saved.fn===r.fn&&SH.saved.uri)target={uri:SH.saved.uri};
+   if(!target){if(!SH.cache||SH.cache.fn!==r.fn){shMsg('Preparing the video for sharing...');const c=await window.CutloomNative.saveDetailed(file,r.fn,'cache');SH.cache={fn:r.fn,path:c.path}}target={path:SH.cache.path}}
+   /* v23.5: several parts (WhatsApp Status) share together: cache copies of every part, sent as one ACTION_SEND_MULTIPLE */
+   if(S.results.length>1&&!target.uri){SH.multi=SH.multi||{};const ps=[];for(let i=0;i<S.results.length;i++){const x=S.results[i];if(!SH.multi[x.fn]){shMsg('Preparing part '+(i+1)+' of '+S.results.length+' for sharing...');const c=await window.CutloomNative.saveDetailed(new File([x.blob],x.fn,{type:x.blob.type||'video/mp4'}),x.fn,'cache');SH.multi[x.fn]=c.path}ps.push(SH.multi[x.fn])}target={paths:ps}}
+   const T=SHARE_T[kind],apps=SH.apps||(SH.apps=await window.CutloomNative.installedApps()),pkg=T?T.pk.find(p=>apps.includes(p))||'':'';
+   const res=await window.CutloomNative.share(Object.assign({mime:r.blob.type||'video/mp4',pkg,text:txt,title:'Share '+r.fn},target));
+   shMsg((res&&res.count>1?'Sharing all '+res.count+' parts. ':'')+(T?(res.targeted?'Opened '+T.n+'.':T.n+' is not installed, so the share menu opened.'):'Share menu opened.')+(copied?' The title and hashtags are copied: paste them as the caption.':''));
+   if(kind==='cache')shShowSaveRow(true);return}
+  if(kind==='system'||(!DESK&&IS_PHONE())){/* browser: the system share sheet with the file (Android Chrome, Edge, Safari) */
+   /* v23.5: WhatsApp Status parts and other multi-file exports share every part at once */
+    const all=S.results.length>1?S.results.map(x=>new File([x.blob],x.fn,{type:x.blob.type||'video/mp4'})):[file];
+    if(all.length>1&&navigator.canShare&&navigator.canShare({files:all})){await navigator.share({files:all,title:seo.title,text:txt});shMsg('Shared all '+all.length+' parts.'+(copied?' The caption is copied too.':''));return}
+    if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:seo.title,text:txt});shMsg('Shared.'+(copied?' The caption is copied too.':''));return}
+   if(kind==='system'){shMsg('This browser cannot share video files directly. The video is in your downloads: open the app you want and upload it from there.'+(copied?' The caption is copied.':''));return}}
+  /* computer: open the platform's upload page, show the file, caption on the clipboard */
+  const T=SHARE_T[kind];if(!T)return;let shown=false;
+  if(DESK){try{const j=await (await fetch('/api/reveal',{method:'POST'})).json();shown=!!j.ok}catch(_){}}
+  window.open(T.u,'_blank','noopener');
+  shMsg('Opened '+T.n+' upload in your browser. '+(shown?'The video is shown in its folder: drag it into the upload page. ':'Upload "'+r.fn+'" from your Downloads folder. ')+(copied?'The title, caption and hashtags are copied: paste them there.':''))}
+ catch(e){if(e&&e.name==='AbortError'){shMsg('');return}console.warn('[share]',e);const m=(e&&e.message)||String(e);shMsg(m,true);if(e&&e.nospace)shShowSaveRow(true)}
+ finally{if(btn)btn.disabled=false}}
+async function shareShow(){const r=shLast();if(!r)return;const el=shareEl(),seo=seoText();el.classList.remove('hidden');el.querySelector('.pxsh-txt').value=seo.text;SH.cache=null;
+ const sys=el.querySelector('[data-sh="system"]');sys.classList.toggle('hidden',DESK);
+ el.querySelector('.pxsh-how').textContent=NATIVE()?'Buttons open the app directly when it is installed. Instagram and TikTok ignore pre-filled captions: paste the copied text.':DESK?'Cutloom opens the upload page in your browser and shows the video file. Direct uploading from Cutloom needs a sign-in with each platform and is not available yet.':'On a phone, Share opens the apps on your phone. On a computer, upload the downloaded file on the page that opens.';
+ const note=await shSpaceNote(r);if(note){shMsg(note+' If saving fails: Share without saving, or Export smaller.',true);shShowSaveRow(NATIVE())}else{shMsg('');shShowSaveRow(false)}}
+{const _fin=finish;finish=function(blob,ext,note,name){_fin(blob,ext,note,name);try{shareShow()}catch(e){console.warn('[share]',e)}}}
+/* the phone app reports saves and save errors (never silent) */
+document.addEventListener('cutloom:saved',e=>{const r=shLast();if(r&&e.detail&&e.detail.name===r.fn){SH.saved={fn:r.fn,where:e.detail.where,uri:e.detail.uri};shMsg('Saved to '+e.detail.where+'.');shShowSaveRow(false)}});
+document.addEventListener('cutloom:savefail',e=>{const d=e.detail||{};if(!$('pxShare'))return;shMsg((d.nospace?'Not saved: your phone storage is full. ':'Not saved: ')+(d.message||'')+' You can Share without saving, Export smaller (540p), or free some space and press Save to phone.',true);shShowSaveRow(true);try{toast('Export not saved: '+(d.message||'error'),8000)}catch(_){}});
+/* the phone app: remember the gallery uri of a save so Share uses that copy */
+{const hook=()=>{if(!NATIVE()||window.CutloomNative.__shHooked)return;window.CutloomNative.__shHooked=1;const _sd=window.CutloomNative.saveToDevice;window.CutloomNative.saveToDevice=async function(blob,name,mode){if(mode)return _sd(blob,name,mode);const r=await window.CutloomNative.saveDetailed(blob,name,'save');const cur=shLast();if(cur&&cur.fn===name)SH.saved={fn:name,where:r.where,uri:r.uri};return r.where}};
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',hook);else setTimeout(hook,0)}
+
+/* ---------- 4) MP3 next to the start screen's link import (website + Windows app) ---------- */
+{const go=$('lnkGo');if(go&&!$('lnkMp3')&&!window.Capacitor){const b=document.createElement('button');b.id='lnkMp3';b.type='button';b.className='btn sm';b.textContent='MP3';b.title='Download only the sound of this YouTube video as MP3';
+  b.onclick=async()=>{const u=val('lnk').trim();if(!dlParse(u)){$('lnkMsg').textContent='Paste a YouTube link (or a link to an audio/video file) first, then press MP3.';return}
+   try{if(typeof openDownloader==='function')openDownloader();else showTab('download')}catch(_){}$('dlUrl').value=u;await dlFind();if(!$('dlOpts').classList.contains('hidden'))dlRun('mp3',false)};
+  go.after(b)}}
+
+/* ---------- 5) handles for the Android layer and for tests ---------- */
+Object.assign(window.CUTLOOM_PLUS,{toMp3:(b,onp,sig)=>toMp3(b,onp||(()=>{}),sig),addMusic:f=>addMusic([f]),saveNow:()=>{try{return saveProject()}catch(_){}},seoText,shareShow});
+if(window.CUTLOOM_DEBUG){Object.assign(window.CUTLOOM_DEBUG,{fn:{renderCaps:()=>renderCaps(),newProject:()=>newProjectUI(),showTab:t=>showTab(t),applyCapStyle:k=>applyCapStyle(k),get REC(){return REC},recClose:k=>recClose(k),dlFind:()=>dlFind()},EXP,capModel:()=>capModel(),audio16k:(f,a,b)=>audio16kFrom(f,a,b),clAudioStream,toMp3:(b)=>toMp3(b,()=>{}),seoText,get SH(){return SH}})}
 /*PLUS_END*/
 
 })();
